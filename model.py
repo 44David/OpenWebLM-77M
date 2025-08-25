@@ -20,8 +20,8 @@ class DecoderBlock(nn.Module):
         self.ln2 = FastLayerNorm(d_model)
         
         # Use efficient attention
-        self.attention = MultiHeadAttention(d_model)
-        self.ffn = Net()
+        self.attention = MultiHeadAttention(d_model=d_model)
+        self.ffn = Net(d_model)
         
     def forward(self, x):
         # Pre-norm architecture for better training stability

@@ -5,10 +5,10 @@ import torch.nn.functional as F
 
 class Net(nn.Module):
     
-    def __init__(self):
+    def __init__(self, d_model=512):
         super(Net, self).__init__()
-        self.d_model = 512
-        self.d_ff = 4 * 512
+        self.d_model = d_model
+        self.d_ff = 4 * d_model
         
         # Linear(dim_in, dim_out)
         self.fc1 = nn.Linear(self.d_model, self.d_ff)
