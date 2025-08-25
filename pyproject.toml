@@ -1,0 +1,21 @@
+[project]
+name = "lm-net"
+version = "0.1.0"
+description = ""
+authors = [
+    {name = "44David",email = "david.soane@outlook.com"}
+]
+readme = "README.md"
+requires-python = ">=3.13, <3.14"
+dependencies = [
+    "numpy (>=2.3.2,<3.0.0)",
+    "torch (>=2.8.0,<3.0.0)",
+    "matplotlib (>=3.10.5,<4.0.0)",
+    "datasets (>=4.0.0,<5.0.0)",
+    "transformers (>=4.55.2,<5.0.0)"
+]
+
+
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"
