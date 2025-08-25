@@ -74,7 +74,7 @@ def main():
     for i, item in enumerate(dataset):
         if i >= 300000:
             break
-        if len(item['text'].strip()) > 0:
+        if item['text'] is not None and len(item['text'].strip()) > 0:
             texts.append(item['text'])
         
         if i % 50000 == 0:
