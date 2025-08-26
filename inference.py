@@ -2,9 +2,10 @@ import torch
 import torch.nn.functional as F
 from transformers import GPT2TokenizerFast
 from model import Transformer
+import os
 
 class ModelChat:
-    def __init__(self, model_path='OpenWebLM-v1-77M.pth', use_mixed_precision=True):
+    def __init__(self, model_path='OpenWebLM-v1-200M.pth', use_mixed_precision=True):
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.use_mixed_precision = use_mixed_precision and torch.cuda.is_available()
         
@@ -19,7 +20,7 @@ class ModelChat:
         self.tokenizer = GPT2TokenizerFast.from_pretrained('gpt2')
         self.tokenizer.pad_token = self.tokenizer.eos_token
         
-        self.model = Transformer().to(self.device)
+        self.model = Transformer(d_model=768, n_layers=12).to(self.device)
         if self.use_mixed_precision:
             self.model = self.model.half()
             
@@ -27,16 +28,23 @@ class ModelChat:
         self.model.load_state_dict(checkpoint['model_state_dict'], strict=False)
         self.model.eval()
         
-        # Optimize for inference
         if hasattr(torch.backends.cudnn, 'allow_tf32'):
             torch.backends.cudnn.allow_tf32 = True
         if hasattr(torch.backends.cuda.matmul, 'allow_tf32'):
             torch.backends.cuda.matmul.allow_tf32 = True
-            
+        
+        if 'epoch' in checkpoint:
+            print(f"Loaded checkpoint from epoch {checkpoint['epoch']}")
         if 'training_time_hours' in checkpoint:
             print(f"Model trained for {checkpoint['training_time_hours']:.2f} hours")
         if 'final_loss' in checkpoint:
             print(f"Final training loss: {checkpoint['final_loss']:.4f}")
+        if 'loss' in checkpoint:
+            print(f"Checkpoint loss: {checkpoint['loss']:.4f}")
+        if 'timestamp' in checkpoint:
+            import datetime
+            checkpoint_time = datetime.datetime.fromtimestamp(checkpoint['timestamp'])
+            print(f"Checkpoint saved at: {checkpoint_time.strftime('%Y-%m-%d %H:%M:%S')}")
         print(f"Model loaded successfully!")
     
     @torch.inference_mode()
@@ -45,14 +53,12 @@ class ModelChat:
         input_ids = self.tokenizer.encode(prompt, return_tensors='pt').to(self.device)
         original_length = input_ids.size(1)
         
-        # Pre-allocate tensor for efficiency
         max_total_length = min(original_length + max_length, 1024)
         generated_ids = torch.zeros(1, max_total_length, dtype=input_ids.dtype, device=self.device)
         generated_ids[0, :original_length] = input_ids[0]
         
         current_length = original_length
         
-        # Use autocast for mixed precision if available
         autocast_context = torch.cuda.amp.autocast() if self.use_mixed_precision else torch.no_grad()
         
         with autocast_context:
@@ -79,7 +85,6 @@ class ModelChat:
                 generated_ids[0, current_length] = next_token
                 current_length += 1
         
-        # Decode only the generated portion
         full_text = self.tokenizer.decode(generated_ids[0, :current_length], skip_special_tokens=True)
         prompt_text = self.tokenizer.decode(generated_ids[0, :original_length], skip_special_tokens=True)
         generated_text = full_text[len(prompt_text):]
@@ -88,7 +93,7 @@ class ModelChat:
 
     def interactive_chat(self):
         print("\n" + "="*50)
-        print("OpenWebLM-v1-77M Interactive Chat")
+        print("OpenWebLM-v1-200M Interactive Chat")
         print("Commands:")
         print("  'quit' or 'exit' - Exit chat")
         print("  'temp X' - Set temperature (e.g., 'temp 0.7')")
@@ -144,11 +149,38 @@ class ModelChat:
                 continue
 
 def main():
+    import sys
+    import glob
+    
+    model_path = 'OpenWebLM-v1-200M.pth'
+    if len(sys.argv) > 1:
+        model_path = sys.argv[1]
+    
+    if model_path == 'OpenWebLM-v1-200M.pth' and not os.path.exists(model_path):
+        checkpoint_files = glob.glob('checkpoints/OpenWebLM-v1-200M-epoch-*.pth')
+        if checkpoint_files:
+            checkpoint_files.sort(key=lambda x: int(x.split('-epoch-')[1].split('.')[0]))
+            print("Available epoch checkpoints:")
+            for i, checkpoint in enumerate(checkpoint_files):
+                epoch_num = checkpoint.split('-epoch-')[1].split('.')[0]
+                print(f"  {i+1}. {checkpoint} (Epoch {epoch_num})")
+            
+            try:
+                choice = input(f"Select checkpoint (1-{len(checkpoint_files)}) or press Enter for latest: ").strip()
+                if choice:
+                    model_path = checkpoint_files[int(choice)-1]
+                else:
+                    model_path = checkpoint_files[-1]  # Latest
+                print(f"Using checkpoint: {model_path}")
+            except (ValueError, IndexError):
+                print("Invalid choice, using latest checkpoint")
+                model_path = checkpoint_files[-1]
+    
     try:
-        chat = ModelChat()
+        chat = ModelChat(model_path)
         chat.interactive_chat()
     except FileNotFoundError:
-        print("Error: OpenWebLM-v1-77M.pth not found!")
+        print(f"Error: {model_path} not found!")
         print("Make sure you've trained the model first with train.py")
     except Exception as e:
         print(f"Error loading model: {e}")

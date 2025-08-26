@@ -4,7 +4,7 @@ import torch.nn.functional as F
 import math
 
 class MultiHeadAttention(nn.Module):
-    def __init__(self, d_model=512, n_heads=8):
+    def __init__(self, d_model=768, n_heads=12):
         super().__init__()
         self.d_model = d_model
         self.n_heads = n_heads
@@ -44,7 +44,7 @@ def multi_head_attention(encoder_input, multi_head_w_q, multi_head_w_k, multi_he
         encoder_input = encoder_input.unsqueeze(0)
     
     batch_size, actual_seq_len, d_model = encoder_input.shape
-    n_heads = 8
+    n_heads = 12
     d_k = d_model // n_heads
     
     q = torch.matmul(encoder_input, multi_head_w_q).view(batch_size, actual_seq_len, n_heads, d_k).transpose(1, 2)

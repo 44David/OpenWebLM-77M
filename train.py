@@ -8,9 +8,10 @@ from model import Transformer
 import time
 import json
 import math
+import os
 
 class TextDataset(Dataset):
-    def __init__(self, texts, tokenizer, max_length=512):
+    def __init__(self, texts, tokenizer, max_length=1024):
         self.tokenizer = tokenizer
         self.max_length = max_length
         self.texts = texts
@@ -35,9 +36,56 @@ class TextDataset(Dataset):
             'targets': input_ids[1:]      
         }
 
+def save_checkpoint(model, optimizer, scheduler, epoch, batch_idx, loss, training_log, checkpoint_dir="checkpoints"):
+    """Save training checkpoint"""
+    os.makedirs(checkpoint_dir, exist_ok=True)
+    
+    checkpoint = {
+        'epoch': epoch,
+        'batch_idx': batch_idx,
+        'model_state_dict': model.state_dict(),
+        'optimizer_state_dict': optimizer.state_dict(),
+        'scheduler_state_dict': scheduler.state_dict(),
+        'loss': loss,
+        'training_log': training_log,
+        'timestamp': time.time()
+    }
+    
+    epoch_path = os.path.join(checkpoint_dir, f'OpenWebLM-v1-200M-epoch-{epoch}.pth')
+    torch.save(checkpoint, epoch_path)
+    print(f"Checkpoint saved: {epoch_path}")
+    
+    latest_path = os.path.join(checkpoint_dir, 'OpenWebLM-v1-200M-latest.pth')
+    torch.save(checkpoint, latest_path)
+    
+    return epoch_path
+
+def load_checkpoint(checkpoint_path, model, optimizer, scheduler):
+    """Load training checkpoint"""
+    checkpoint = torch.load(checkpoint_path, map_location=model.device if hasattr(model, 'device') else 'cpu')
+    
+    model.load_state_dict(checkpoint['model_state_dict'])
+    optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+    scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+    
+    start_epoch = checkpoint['epoch'] + 1  # Resume from next epoch
+    training_log = checkpoint.get('training_log', {'epochs': [], 'batches': []})
+    
+    print(f"Resumed from epoch {checkpoint['epoch']}, batch {checkpoint['batch_idx']}")
+    print(f"Previous loss: {checkpoint['loss']:.4f}")
+    
+    return start_epoch, training_log
+
 def main():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
+    
+    # Check for resume option
+    resume_from_checkpoint = False
+    checkpoint_path = "checkpoints/OpenWebLM-v1-200M-latest.pth"
+    if os.path.exists(checkpoint_path):
+        resume_choice = input(f"Found checkpoint at {checkpoint_path}. Resume training? (y/n): ").lower().strip()
+        resume_from_checkpoint = resume_choice in ['y', 'yes']
     
     if torch.cuda.is_available():
         torch.backends.cudnn.benchmark = True
@@ -47,7 +95,6 @@ def main():
         if hasattr(torch.backends.cuda.matmul, 'allow_tf32'):
             torch.backends.cuda.matmul.allow_tf32 = True
     
-    # Mixed precision training
     use_mixed_precision = torch.cuda.is_available() and torch.cuda.get_device_capability()[0] >= 7
     scaler = torch.cuda.amp.GradScaler() if use_mixed_precision else None
     print(f"Mixed precision: {use_mixed_precision}")
@@ -67,23 +114,87 @@ def main():
     tokenizer.pad_token = tokenizer.eos_token
     
   
-    print("Loading OpenWebText subset-00 dataset...")
-    dataset = load_dataset('finnstrom3693/opewebtext-subset-00', split='train', streaming=True)
+    print("Loading conversational datasets for better dialogue training...")
     
     texts = []
-    for i, item in enumerate(dataset):
-        if i >= 300000:
-            break
-        if item['text'] is not None and len(item['text'].strip()) > 0:
-            texts.append(item['text'])
-        
-        if i % 50000 == 0:
-            print(f"Loaded {i} samples...")
     
-    print(f"Loaded {len(texts)} text samples from OpenWebText subset-00")
+    print("Loading PersonaChat...")
+    try:
+        persona_dataset = load_dataset('personachat', split='train')
+        for i, item in enumerate(persona_dataset):
+            if len(texts) >= 400000: 
+                break
+            if 'utterances' in item:
+                utterances = item['utterances']
+                if isinstance(utterances, list) and len(utterances) > 1:
+                    dialogue_parts = []
+                    for j, utt in enumerate(utterances[:6]):  
+                        speaker = "Human" if j % 2 == 0 else "Assistant"
+                        text_content = utt['text'] if isinstance(utt, dict) else str(utt)
+                        dialogue_parts.append(f"{speaker}: {text_content}")
+                    dialogue = " ".join(dialogue_parts)
+                    if len(dialogue.strip()) > 20:
+                        texts.append(dialogue)
+            if i % 50000 == 0:
+                print(f"Loaded {len(texts)} PersonaChat samples...")
+    except Exception as e:
+        print(f"PersonaChat not available: {e}")
+    
+    
+    print("Loading DailyDialog...")
+    try:
+        daily_dataset = load_dataset('daily_dialog', split='train')
+        for i, item in enumerate(daily_dataset):
+            if len(texts) >= 700000:  
+                break
+            if 'dialog' in item:
+                dialog = item['dialog']
+                if isinstance(dialog, list) and len(dialog) > 1:
+                    dialogue_parts = []
+                    for j, turn in enumerate(dialog[:6]): 
+                        speaker = "Human" if j % 2 == 0 else "Assistant"
+                        dialogue_parts.append(f"{speaker}: {turn}")
+                    dialogue = " ".join(dialogue_parts)
+                    if len(dialogue.strip()) > 20:
+                        texts.append(dialogue)
+            if i % 25000 == 0:
+                print(f"Loaded {len(texts)} total samples (including DailyDialog)...")
+    except Exception as e:
+        print(f"DailyDialog not available: {e}")
+    
+    if len(texts) < 1000000:
+        print(f"Loading OpenWebText to reach 1M samples (currently have {len(texts)})...")
+        try:
+            web_dataset = load_dataset('openwebtext', split='train', streaming=True)
+            for i, item in enumerate(web_dataset):
+                if len(texts) >= 1000000:
+                    break
+                if item['text'] and len(item['text'].strip()) > 50:
+                    clean_text = item['text'].strip()[:800]  
+                    formatted_text = f"Human: Tell me about this. Assistant: {clean_text}"
+                    texts.append(formatted_text)
+                if i % 25000 == 0:
+                    print(f"Loaded {len(texts)} total samples...")
+        except Exception as e:
+            print(f"OpenWebText not available: {e}")
+            try:
+                dataset = load_dataset('finnstrom3693/opewebtext-subset-00', split='train', streaming=True)
+                for i, item in enumerate(dataset):
+                    if len(texts) >= 1000000:
+                        break
+                    if item['text'] and len(item['text'].strip()) > 50:
+                        clean_text = item['text'].strip()[:800]
+                        formatted_text = f"Human: Tell me about this. Assistant: {clean_text}"
+                        texts.append(formatted_text)
+                    if i % 50000 == 0:
+                        print(f"Loaded {len(texts)} total samples (fallback)...")
+            except Exception as e2:
+                print(f"Fallback dataset also failed: {e2}")
+    
+    print(f"Loaded {len(texts)} conversational text samples")
     
     train_dataset = TextDataset(texts, tokenizer)  
-    batch_size = 32
+    batch_size = 16
     train_loader = DataLoader(
         train_dataset, 
         batch_size=batch_size, 
@@ -94,17 +205,26 @@ def main():
     )
     print(f"Using batch size: {batch_size}")
     
-    model = Transformer().to(device)
+    model = Transformer(d_model=768, n_layers=12).to(device)
     
     criterion = nn.CrossEntropyLoss(ignore_index=tokenizer.pad_token_id)
-    optimizer = optim.AdamW(model.parameters(), lr=1e-4, weight_decay=0.1)  # Lower LR
+    optimizer = optim.AdamW(model.parameters(), lr=3e-4, weight_decay=0.1)  
     
-    # learning rate scheduler
     num_epochs = 5
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epochs)
     
+    start_epoch = 0
+    if resume_from_checkpoint:
+        try:
+            start_epoch, training_log = load_checkpoint(checkpoint_path, model, optimizer, scheduler)
+            print(f"Resuming training from epoch {start_epoch}")
+        except Exception as e:
+            print(f"Failed to load checkpoint: {e}")
+            print("Starting fresh training...")
+            start_epoch = 0
+    
     model.train()
-    for epoch in range(num_epochs):
+    for epoch in range(start_epoch, num_epochs):
         total_loss = 0
         epoch_start = time.time()
         epoch_log = {
@@ -169,6 +289,11 @@ def main():
                       f'Perplexity: {perplexity:.2f}, LR: {current_lr:.6f}, '
                       f'Grad Norm: {grad_norm.item():.4f}, '
                       f'Time: {elapsed_hours:.2f}h, Est. cost: ${elapsed_hours * 0.526:.2f}')
+            
+            # Save intermediate checkpoint every 1000 batches
+            if batch_idx > 0 and batch_idx % 1000 == 0:
+                print(f"Saving intermediate checkpoint at epoch {epoch}, batch {batch_idx}")
+                save_checkpoint(model, optimizer, scheduler, epoch, batch_idx, loss.item(), training_log)
         
         scheduler.step()
         
@@ -183,9 +308,15 @@ def main():
         
         print(f'Epoch {epoch} completed in {epoch_time:.1f} min. '
               f'Average Loss: {avg_loss:.4f}, Average Perplexity: {avg_perplexity:.2f}')
+        
+        # Save epoch checkpoint
+        print(f"Saving epoch {epoch} checkpoint...")
+        checkpoint_path = save_checkpoint(model, optimizer, scheduler, epoch, len(train_loader)-1, avg_loss, training_log)
+        print(f"Epoch {epoch} checkpoint saved at: {checkpoint_path}")
+        print(f"You can test this checkpoint by running inference with: python inference.py")
     
     total_time = (time.time() - start_time) / 3600
-    estimated_cost = total_time * 0.526  # g4dn.xlarge price ( change for runpod )
+    estimated_cost = total_time * 0.26 # runpod A4500 cost per hour  
     
     training_log['total_time_hours'] = total_time
     training_log['estimated_cost'] = estimated_cost
@@ -211,14 +342,14 @@ def main():
         'training_time_hours': total_time,
         'mixed_precision': use_mixed_precision,
         'batch_size': batch_size
-    }, 'OpenWebLM-v1-77M.pth')
+    }, 'OpenWebLM-v1-200M.pth')
     
     print(f"\nTraining completed!")
     print(f"Total time: {total_time:.2f} hours")
     print(f"Estimated cost: ${estimated_cost:.2f}")
     print(f"Final loss: {avg_loss:.4f}")
     print(f"Final perplexity: {avg_perplexity:.2f}")
-    print("Model saved as 'OpenWebLM-v1-77M.pth'")
+    print("Model saved as 'OpenWebLM-v1-200M.pth'")
     print("Training log saved as 'training_log.json'")
 
 if __name__ == "__main__":

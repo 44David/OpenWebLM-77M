@@ -15,16 +15,13 @@ class DecoderBlock(nn.Module):
         
         self.d_model = d_model
         
-        # Use efficient LayerNorm
         self.ln1 = FastLayerNorm(d_model)
         self.ln2 = FastLayerNorm(d_model)
         
-        # Use efficient attention
         self.attention = MultiHeadAttention(d_model=d_model)
         self.ffn = Net(d_model)
         
     def forward(self, x):
-        # Pre-norm architecture for better training stability
         attn_out = self.attention(self.ln1(x))
         x = x + attn_out
         
@@ -36,38 +33,31 @@ class DecoderBlock(nn.Module):
     
 
 class Transformer(nn.Module):
-    def __init__(self, vocab_size=50257, d_model=512, n_layers=8):
+    def __init__(self, vocab_size=50257, d_model=768, n_layers=12):
         super().__init__()
         
         self.d_model = d_model
         self.n_layers = n_layers
         self.vocab_size = vocab_size
         
-        # Use efficient embedding layer
         self.embedding = EmbeddingLayer(vocab_size, d_model)
         
-        # Transformer blocks
         self.layers = nn.ModuleList([
             DecoderBlock(d_model) for _ in range(n_layers)
         ])
         
-        # Final layer norm
         self.ln_final = FastLayerNorm(d_model)
         
-        # Language modeling head
         self.lm_head = nn.Linear(d_model, vocab_size, bias=False)
         
         self._init_weights()
         
     def forward(self, x):
-        # Use efficient embedding
         x = self.embedding(x)
         
-        # Pass through transformer blocks
         for layer in self.layers:
             x = layer(x)
         
-        # Final layer norm and projection
         x = self.ln_final(x)
         logits = self.lm_head(x)
         
