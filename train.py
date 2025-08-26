@@ -51,11 +51,11 @@ def save_checkpoint(model, optimizer, scheduler, epoch, batch_idx, loss, trainin
         'timestamp': time.time()
     }
     
-    epoch_path = os.path.join(checkpoint_dir, f'OpenWebLM-v1-200M-epoch-{epoch}.pth')
+    epoch_path = os.path.join(checkpoint_dir, f'WebLM-77M-epoch-{epoch}.pth')
     torch.save(checkpoint, epoch_path)
     print(f"Checkpoint saved: {epoch_path}")
     
-    latest_path = os.path.join(checkpoint_dir, 'OpenWebLM-v1-200M-latest.pth')
+    latest_path = os.path.join(checkpoint_dir, 'WebLM-77M-latest.pth')
     torch.save(checkpoint, latest_path)
     
     return epoch_path
@@ -68,7 +68,7 @@ def load_checkpoint(checkpoint_path, model, optimizer, scheduler):
     optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
     scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
     
-    start_epoch = checkpoint['epoch'] + 1  # Resume from next epoch
+    start_epoch = checkpoint['epoch'] + 1
     training_log = checkpoint.get('training_log', {'epochs': [], 'batches': []})
     
     print(f"Resumed from epoch {checkpoint['epoch']}, batch {checkpoint['batch_idx']}")
@@ -76,13 +76,15 @@ def load_checkpoint(checkpoint_path, model, optimizer, scheduler):
     
     return start_epoch, training_log
 
+
+
 def main():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
     
     # Check for resume option
     resume_from_checkpoint = False
-    checkpoint_path = "checkpoints/OpenWebLM-v1-200M-latest.pth"
+    checkpoint_path = "checkpoints/WebLM-77M-latest.pth"
     if os.path.exists(checkpoint_path):
         resume_choice = input(f"Found checkpoint at {checkpoint_path}. Resume training? (y/n): ").lower().strip()
         resume_from_checkpoint = resume_choice in ['y', 'yes']
@@ -99,7 +101,6 @@ def main():
     scaler = torch.cuda.amp.GradScaler() if use_mixed_precision else None
     print(f"Mixed precision: {use_mixed_precision}")
     
-    # cost tracking
     start_time = time.time()
     
     training_log = {
@@ -113,87 +114,89 @@ def main():
     tokenizer = GPT2TokenizerFast.from_pretrained('gpt2')
     tokenizer.pad_token = tokenizer.eos_token
     
-  
-    print("Loading conversational datasets for better dialogue training...")
+    print("Loading high-quality datasets for better language understanding...")
     
     texts = []
-    
-    print("Loading PersonaChat...")
+    target_samples = 2000000      
+    print("Loading Wikipedia...")
     try:
-        persona_dataset = load_dataset('personachat', split='train')
-        for i, item in enumerate(persona_dataset):
-            if len(texts) >= 400000: 
+        wiki_dataset = load_dataset('wikipedia', '20220301.en', split='train', streaming=True)
+        for i, item in enumerate(wiki_dataset):
+            if len(texts) >= target_samples // 3:  
                 break
-            if 'utterances' in item:
-                utterances = item['utterances']
-                if isinstance(utterances, list) and len(utterances) > 1:
-                    dialogue_parts = []
-                    for j, utt in enumerate(utterances[:6]):  
-                        speaker = "Human" if j % 2 == 0 else "Assistant"
-                        text_content = utt['text'] if isinstance(utt, dict) else str(utt)
-                        dialogue_parts.append(f"{speaker}: {text_content}")
-                    dialogue = " ".join(dialogue_parts)
-                    if len(dialogue.strip()) > 20:
-                        texts.append(dialogue)
-            if i % 50000 == 0:
-                print(f"Loaded {len(texts)} PersonaChat samples...")
+            if item['text'] and len(item['text'].strip()) > 100:
+                clean_text = item['text'].strip()
+                if len(clean_text) > 2000:
+                    chunks = [clean_text[i:i+1500] for i in range(0, len(clean_text), 1200)]
+                    texts.extend(chunks[:3])  
+                else:
+                    texts.append(clean_text)
+            
+            if i % 10000 == 0:
+                print(f"Loaded {len(texts)} Wikipedia samples...")
+                
     except Exception as e:
-        print(f"PersonaChat not available: {e}")
+        print(f"Wikipedia not available: {e}")
     
-    
-    print("Loading DailyDialog...")
+    print("Loading BookCorpus...")
     try:
-        daily_dataset = load_dataset('daily_dialog', split='train')
-        for i, item in enumerate(daily_dataset):
-            if len(texts) >= 700000:  
+        book_dataset = load_dataset('bookcorpus', split='train', streaming=True)
+        for i, item in enumerate(book_dataset):
+            if len(texts) >= (target_samples * 2) // 3:  
                 break
-            if 'dialog' in item:
-                dialog = item['dialog']
-                if isinstance(dialog, list) and len(dialog) > 1:
-                    dialogue_parts = []
-                    for j, turn in enumerate(dialog[:6]): 
-                        speaker = "Human" if j % 2 == 0 else "Assistant"
-                        dialogue_parts.append(f"{speaker}: {turn}")
-                    dialogue = " ".join(dialogue_parts)
-                    if len(dialogue.strip()) > 20:
-                        texts.append(dialogue)
-            if i % 25000 == 0:
-                print(f"Loaded {len(texts)} total samples (including DailyDialog)...")
+            if item['text'] and len(item['text'].strip()) > 100:
+                clean_text = item['text'].strip()
+                if len(clean_text) > 2000:
+                    chunks = [clean_text[i:i+1500] for i in range(0, len(clean_text), 1200)]
+                    texts.extend(chunks[:2])  
+                else:
+                    texts.append(clean_text)
+            
+            if i % 5000 == 0:
+                print(f"Loaded {len(texts)} total samples (including books)...")
+                
     except Exception as e:
-        print(f"DailyDialog not available: {e}")
+        print(f"BookCorpus not available: {e}")
     
-    if len(texts) < 1000000:
-        print(f"Loading OpenWebText to reach 1M samples (currently have {len(texts)})...")
+    if len(texts) < target_samples:
+        print(f"Loading C4 to reach {target_samples} samples (currently have {len(texts)})...")
         try:
-            web_dataset = load_dataset('openwebtext', split='train', streaming=True)
-            for i, item in enumerate(web_dataset):
-                if len(texts) >= 1000000:
+            c4_dataset = load_dataset('allenai/c4', 'en', split='train', streaming=True)
+            for i, item in enumerate(c4_dataset):
+                if len(texts) >= target_samples:
                     break
-                if item['text'] and len(item['text'].strip()) > 50:
-                    clean_text = item['text'].strip()[:800]  
-                    formatted_text = f"Human: Tell me about this. Assistant: {clean_text}"
-                    texts.append(formatted_text)
+                if item['text'] and len(item['text'].strip()) > 100:
+                    clean_text = item['text'].strip()
+                    if len(clean_text) < 3000 and clean_text.count('\n') < 10:
+                        texts.append(clean_text)
+                
                 if i % 25000 == 0:
                     print(f"Loaded {len(texts)} total samples...")
+                    
         except Exception as e:
-            print(f"OpenWebText not available: {e}")
+            print(f"C4 not available: {e}")
             try:
-                dataset = load_dataset('finnstrom3693/opewebtext-subset-00', split='train', streaming=True)
-                for i, item in enumerate(dataset):
-                    if len(texts) >= 1000000:
+                web_dataset = load_dataset('openwebtext', split='train', streaming=True)
+                for i, item in enumerate(web_dataset):
+                    if len(texts) >= target_samples:
                         break
-                    if item['text'] and len(item['text'].strip()) > 50:
-                        clean_text = item['text'].strip()[:800]
-                        formatted_text = f"Human: Tell me about this. Assistant: {clean_text}"
-                        texts.append(formatted_text)
-                    if i % 50000 == 0:
-                        print(f"Loaded {len(texts)} total samples (fallback)...")
+                    if item['text'] and len(item['text'].strip()) > 100:
+                        clean_text = item['text'].strip()[:1500]
+                        texts.append(clean_text)
+                    if i % 25000 == 0:
+                        print(f"Loaded {len(texts)} total samples...")
             except Exception as e2:
                 print(f"Fallback dataset also failed: {e2}")
     
-    print(f"Loaded {len(texts)} conversational text samples")
+    print(f"Final dataset: {len(texts)} text samples")
     
-    train_dataset = TextDataset(texts, tokenizer)  
+    sample_text = ' '.join(texts[:100])
+    sample_tokens = len(tokenizer(sample_text)['input_ids'])
+    avg_tokens_per_sample = sample_tokens / 100
+    estimated_total_tokens = len(texts) * avg_tokens_per_sample
+    print(f"Estimated total tokens: {estimated_total_tokens/1e9:.2f}B")
+    
+    train_dataset = TextDataset(texts, tokenizer)
     batch_size = 16
     train_loader = DataLoader(
         train_dataset, 
@@ -205,12 +208,15 @@ def main():
     )
     print(f"Using batch size: {batch_size}")
     
-    model = Transformer(d_model=768, n_layers=12).to(device)
+    model = Transformer(d_model=512, n_layers=8).to(device)  
+    
+    total_params = sum(p.numel() for p in model.parameters())
+    print(f"Model has {total_params/1e6:.1f}M parameters")
     
     criterion = nn.CrossEntropyLoss(ignore_index=tokenizer.pad_token_id)
-    optimizer = optim.AdamW(model.parameters(), lr=3e-4, weight_decay=0.1)  
+    optimizer = optim.AdamW(model.parameters(), lr=6e-4, weight_decay=0.1)
     
-    num_epochs = 5
+    num_epochs = 100  
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epochs)
     
     start_epoch = 0
@@ -239,7 +245,7 @@ def main():
             input_ids = batch['input_ids'].to(device, non_blocking=True)
             targets = batch['targets'].to(device, non_blocking=True)
             
-            optimizer.zero_grad(set_to_none=True) 
+            optimizer.zero_grad(set_to_none=True)
             
             if use_mixed_precision:
                 with torch.cuda.amp.autocast():
@@ -251,9 +257,7 @@ def main():
                 
                 scaler.scale(loss).backward()
                 scaler.unscale_(optimizer)
-                
                 grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-                
                 scaler.step(optimizer)
                 scaler.update()
             else:
@@ -263,13 +267,11 @@ def main():
                     targets.view(-1)
                 )
                 loss.backward()
-                
                 grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-                
                 optimizer.step()
             
             total_loss += loss.item()
-            perplexity = math.exp(loss.item())
+            perplexity = math.exp(min(loss.item(), 10)) 
             
             if batch_idx % 100 == 0:
                 elapsed_hours = (time.time() - start_time) / 3600
@@ -281,25 +283,25 @@ def main():
                     'learning_rate': current_lr,
                     'grad_norm': grad_norm.item(),
                     'elapsed_hours': elapsed_hours,
-                    'estimated_cost': elapsed_hours * 0.526
+                    'estimated_cost': elapsed_hours * 0.25
                 }
                 epoch_log['batches'].append(batch_log)
                 
                 print(f'Epoch {epoch}, Batch {batch_idx}, Loss: {loss.item():.4f}, '
                       f'Perplexity: {perplexity:.2f}, LR: {current_lr:.6f}, '
                       f'Grad Norm: {grad_norm.item():.4f}, '
-                      f'Time: {elapsed_hours:.2f}h, Est. cost: ${elapsed_hours * 0.526:.2f}')
+                      f'Time: {elapsed_hours:.2f}h, Cost: ${elapsed_hours * 0.25:.2f}')
             
-            # Save intermediate checkpoint every 1000 batches
-            if batch_idx > 0 and batch_idx % 1000 == 0:
+            # Save intermediate checkpoint every 2000 batches
+            if batch_idx > 0 and batch_idx % 2000 == 0:
                 print(f"Saving intermediate checkpoint at epoch {epoch}, batch {batch_idx}")
                 save_checkpoint(model, optimizer, scheduler, epoch, batch_idx, loss.item(), training_log)
         
         scheduler.step()
         
         avg_loss = total_loss / len(train_loader)
-        avg_perplexity = math.exp(avg_loss)
-        epoch_time = (time.time() - epoch_start) / 60  # minutes
+        avg_perplexity = math.exp(min(avg_loss, 10))
+        epoch_time = (time.time() - epoch_start) / 60
         
         epoch_log['avg_loss'] = avg_loss
         epoch_log['avg_perplexity'] = avg_perplexity
@@ -309,14 +311,18 @@ def main():
         print(f'Epoch {epoch} completed in {epoch_time:.1f} min. '
               f'Average Loss: {avg_loss:.4f}, Average Perplexity: {avg_perplexity:.2f}')
         
+
+        
         # Save epoch checkpoint
-        print(f"Saving epoch {epoch} checkpoint...")
         checkpoint_path = save_checkpoint(model, optimizer, scheduler, epoch, len(train_loader)-1, avg_loss, training_log)
-        print(f"Epoch {epoch} checkpoint saved at: {checkpoint_path}")
-        print(f"You can test this checkpoint by running inference with: python inference.py")
+        
+        # Early stopping if loss is very low
+        if avg_loss < 1.5:
+            print(f"Loss is very low ({avg_loss:.4f}), model likely converged")
+            print("You can stop training or continue for more epochs.")
     
     total_time = (time.time() - start_time) / 3600
-    estimated_cost = total_time * 0.26 # runpod A4500 cost per hour  
+    estimated_cost = total_time * 0.25
     
     training_log['total_time_hours'] = total_time
     training_log['estimated_cost'] = estimated_cost
@@ -324,9 +330,11 @@ def main():
         'final_loss': avg_loss,
         'final_perplexity': avg_perplexity,
         'dataset_size': len(texts),
+        'estimated_tokens': estimated_total_tokens,
         'batch_size': batch_size,
         'mixed_precision': use_mixed_precision,
-        'num_epochs': num_epochs
+        'num_epochs': num_epochs,
+        'model_parameters': total_params
     }
     
     with open('training_log.json', 'w') as f:
@@ -341,16 +349,19 @@ def main():
         'final_perplexity': avg_perplexity,
         'training_time_hours': total_time,
         'mixed_precision': use_mixed_precision,
-        'batch_size': batch_size
-    }, 'OpenWebLM-v1-200M.pth')
+        'batch_size': batch_size,
+        'model_parameters': total_params
+    }, 'WebLM-77M.pth')
     
     print(f"\nTraining completed!")
     print(f"Total time: {total_time:.2f} hours")
     print(f"Estimated cost: ${estimated_cost:.2f}")
     print(f"Final loss: {avg_loss:.4f}")
     print(f"Final perplexity: {avg_perplexity:.2f}")
-    print("Model saved as 'OpenWebLM-v1-200M.pth'")
+    print("Model saved as 'WebLM-77M.pth'")
     print("Training log saved as 'training_log.json'")
+    
+
 
 if __name__ == "__main__":
     main()

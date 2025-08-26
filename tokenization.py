@@ -3,7 +3,7 @@ import torch.nn as nn
 import math
 
 class EmbeddingLayer(nn.Module):
-    def __init__(self, vocab_size=50257, d_model=768, max_seq_len=2048):
+    def __init__(self, vocab_size=50257, d_model=512, max_seq_len=2048):
         super().__init__()
         self.d_model = d_model
         self.max_seq_len = max_seq_len
@@ -33,7 +33,7 @@ class EmbeddingLayer(nn.Module):
         return token_emb + pos_emb
 
 # Legacy global variables for backward compatibility  
-d_model = 768
+d_model = 512
 vocab_size = 50257
 embed = None
 embedding_layer = None
