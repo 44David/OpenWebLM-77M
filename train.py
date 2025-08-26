@@ -76,8 +76,6 @@ def load_checkpoint(checkpoint_path, model, optimizer, scheduler):
     
     return start_epoch, training_log
 
-
-
 def main():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
@@ -114,79 +112,26 @@ def main():
     tokenizer = GPT2TokenizerFast.from_pretrained('gpt2')
     tokenizer.pad_token = tokenizer.eos_token
     
-    print("Loading high-quality datasets for better language understanding...")
+    print("Loading FineWeb dataset...")
     
     texts = []
-    target_samples = 2000000      
-    print("Loading Wikipedia...")
-    try:
-        wiki_dataset = load_dataset('wikipedia', '20220301.en', split='train', streaming=True)
-        for i, item in enumerate(wiki_dataset):
-            if len(texts) >= target_samples // 3:  
-                break
-            if item['text'] and len(item['text'].strip()) > 100:
-                clean_text = item['text'].strip()
-                if len(clean_text) > 2000:
-                    chunks = [clean_text[i:i+1500] for i in range(0, len(clean_text), 1200)]
-                    texts.extend(chunks[:3])  
-                else:
-                    texts.append(clean_text)
-            
-            if i % 10000 == 0:
-                print(f"Loaded {len(texts)} Wikipedia samples...")
-                
-    except Exception as e:
-        print(f"Wikipedia not available: {e}")
+    target_samples = 1_000_000  # 1M rows
     
-    print("Loading BookCorpus...")
-    try:
-        book_dataset = load_dataset('bookcorpus', split='train', streaming=True)
-        for i, item in enumerate(book_dataset):
-            if len(texts) >= (target_samples * 2) // 3:  
-                break
-            if item['text'] and len(item['text'].strip()) > 100:
-                clean_text = item['text'].strip()
-                if len(clean_text) > 2000:
-                    chunks = [clean_text[i:i+1500] for i in range(0, len(clean_text), 1200)]
-                    texts.extend(chunks[:2])  
-                else:
-                    texts.append(clean_text)
-            
-            if i % 5000 == 0:
-                print(f"Loaded {len(texts)} total samples (including books)...")
-                
-    except Exception as e:
-        print(f"BookCorpus not available: {e}")
+    fineweb_dataset = load_dataset('HuggingFaceFW/fineweb', split='train', streaming=True)
     
-    if len(texts) < target_samples:
-        print(f"Loading C4 to reach {target_samples} samples (currently have {len(texts)})...")
-        try:
-            c4_dataset = load_dataset('allenai/c4', 'en', split='train', streaming=True)
-            for i, item in enumerate(c4_dataset):
-                if len(texts) >= target_samples:
-                    break
-                if item['text'] and len(item['text'].strip()) > 100:
-                    clean_text = item['text'].strip()
-                    if len(clean_text) < 3000 and clean_text.count('\n') < 10:
-                        texts.append(clean_text)
-                
-                if i % 25000 == 0:
-                    print(f"Loaded {len(texts)} total samples...")
-                    
-        except Exception as e:
-            print(f"C4 not available: {e}")
-            try:
-                web_dataset = load_dataset('openwebtext', split='train', streaming=True)
-                for i, item in enumerate(web_dataset):
-                    if len(texts) >= target_samples:
-                        break
-                    if item['text'] and len(item['text'].strip()) > 100:
-                        clean_text = item['text'].strip()[:1500]
-                        texts.append(clean_text)
-                    if i % 25000 == 0:
-                        print(f"Loaded {len(texts)} total samples...")
-            except Exception as e2:
-                print(f"Fallback dataset also failed: {e2}")
+    for i, item in enumerate(fineweb_dataset):
+        if len(texts) >= target_samples:
+            break
+        if item['text'] and len(item['text'].strip()) > 100:
+            clean_text = item['text'].strip()
+            if len(clean_text) > 2000:
+                chunks = [clean_text[i:i+1500] for i in range(0, len(clean_text), 1200)]
+                texts.extend(chunks[:3])
+            else:
+                texts.append(clean_text)
+        
+        if i % 50000 == 0:
+            print(f"Loaded {len(texts)} FineWeb samples...")
     
     print(f"Final dataset: {len(texts)} text samples")
     
@@ -216,7 +161,7 @@ def main():
     criterion = nn.CrossEntropyLoss(ignore_index=tokenizer.pad_token_id)
     optimizer = optim.AdamW(model.parameters(), lr=6e-4, weight_decay=0.1)
     
-    num_epochs = 100  
+    num_epochs = 15  
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epochs)
     
     start_epoch = 0
@@ -283,20 +228,15 @@ def main():
                     'learning_rate': current_lr,
                     'grad_norm': grad_norm.item(),
                     'elapsed_hours': elapsed_hours,
-                    'estimated_cost': elapsed_hours * 0.25
+                    'estimated_cost': elapsed_hours * 0.26
                 }
                 epoch_log['batches'].append(batch_log)
                 
                 print(f'Epoch {epoch}, Batch {batch_idx}, Loss: {loss.item():.4f}, '
                       f'Perplexity: {perplexity:.2f}, LR: {current_lr:.6f}, '
                       f'Grad Norm: {grad_norm.item():.4f}, '
-                      f'Time: {elapsed_hours:.2f}h, Cost: ${elapsed_hours * 0.25:.2f}')
+                      f'Time: {elapsed_hours:.2f}h, Cost: ${elapsed_hours * 0.26:.2f}')
             
-            # Save intermediate checkpoint every 2000 batches
-            if batch_idx > 0 and batch_idx % 2000 == 0:
-                print(f"Saving intermediate checkpoint at epoch {epoch}, batch {batch_idx}")
-                save_checkpoint(model, optimizer, scheduler, epoch, batch_idx, loss.item(), training_log)
-        
         scheduler.step()
         
         avg_loss = total_loss / len(train_loader)
@@ -311,10 +251,9 @@ def main():
         print(f'Epoch {epoch} completed in {epoch_time:.1f} min. '
               f'Average Loss: {avg_loss:.4f}, Average Perplexity: {avg_perplexity:.2f}')
         
-
-        
-        # Save epoch checkpoint
-        checkpoint_path = save_checkpoint(model, optimizer, scheduler, epoch, len(train_loader)-1, avg_loss, training_log)
+        # Save checkpoint every 5 epochs or on final epoch
+        if (epoch + 1) % 5 == 0 or epoch == num_epochs - 1:
+            save_checkpoint(model, optimizer, scheduler, epoch, len(train_loader)-1, avg_loss, training_log)
         
         # Early stopping if loss is very low
         if avg_loss < 1.5:
@@ -322,7 +261,7 @@ def main():
             print("You can stop training or continue for more epochs.")
     
     total_time = (time.time() - start_time) / 3600
-    estimated_cost = total_time * 0.25
+    estimated_cost = total_time * 0.26
     
     training_log['total_time_hours'] = total_time
     training_log['estimated_cost'] = estimated_cost
@@ -361,7 +300,6 @@ def main():
     print("Model saved as 'WebLM-77M.pth'")
     print("Training log saved as 'training_log.json'")
     
-
 
 if __name__ == "__main__":
     main()
