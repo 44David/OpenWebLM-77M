@@ -1,3 +1,11 @@
+#!/usr/bin/env python3
+import os
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:128"
+
+import time
+import json
+import math
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -5,13 +13,13 @@ from torch.utils.data import DataLoader, Dataset
 from transformers import GPT2TokenizerFast
 from datasets import load_dataset
 from model import Transformer
-import time
-import json
-import math
-import os
 
 class TextDataset(Dataset):
-    def __init__(self, texts, tokenizer, max_length=1024):
+    def __init__(self, texts, tokenizer, max_length=512):
+        """
+        NOTE: reduced max_length to 512 to lower memory footprint.
+        Increase if your GPU can handle it.
+        """
         self.tokenizer = tokenizer
         self.max_length = max_length
         self.texts = texts
@@ -22,24 +30,20 @@ class TextDataset(Dataset):
     def __getitem__(self, idx):
         text = self.texts[idx]
         tokens = self.tokenizer(
-            text, 
-            max_length=self.max_length, 
-            truncation=True, 
-            padding='max_length', 
+            text,
+            max_length=self.max_length,
+            truncation=True,
+            padding='max_length',
             return_tensors='pt'
         )
-        
         input_ids = tokens['input_ids'].squeeze(0)
-        
         return {
-            'input_ids': input_ids[:-1],  
-            'targets': input_ids[1:]      
+            'input_ids': input_ids[:-1],
+            'targets': input_ids[1:]
         }
 
 def save_checkpoint(model, optimizer, scheduler, epoch, batch_idx, loss, training_log, checkpoint_dir="checkpoints"):
-    """Save training checkpoint"""
     os.makedirs(checkpoint_dir, exist_ok=True)
-    
     checkpoint = {
         'epoch': epoch,
         'batch_idx': batch_idx,
@@ -50,43 +54,35 @@ def save_checkpoint(model, optimizer, scheduler, epoch, batch_idx, loss, trainin
         'training_log': training_log,
         'timestamp': time.time()
     }
-    
     epoch_path = os.path.join(checkpoint_dir, f'WebLM-77M-epoch-{epoch}.pth')
     torch.save(checkpoint, epoch_path)
     print(f"Checkpoint saved: {epoch_path}")
-    
     latest_path = os.path.join(checkpoint_dir, 'WebLM-77M-latest.pth')
     torch.save(checkpoint, latest_path)
-    
     return epoch_path
 
 def load_checkpoint(checkpoint_path, model, optimizer, scheduler):
-    """Load training checkpoint"""
     checkpoint = torch.load(checkpoint_path, map_location=model.device if hasattr(model, 'device') else 'cpu')
-    
     model.load_state_dict(checkpoint['model_state_dict'])
     optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
     scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
-    
     start_epoch = checkpoint['epoch'] + 1
     training_log = checkpoint.get('training_log', {'epochs': [], 'batches': []})
-    
     print(f"Resumed from epoch {checkpoint['epoch']}, batch {checkpoint['batch_idx']}")
     print(f"Previous loss: {checkpoint['loss']:.4f}")
-    
     return start_epoch, training_log
 
 def main():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
-    
-    # Check for resume option
+
+    # interactive resume
     resume_from_checkpoint = False
     checkpoint_path = "checkpoints/WebLM-77M-latest.pth"
     if os.path.exists(checkpoint_path):
         resume_choice = input(f"Found checkpoint at {checkpoint_path}. Resume training? (y/n): ").lower().strip()
         resume_from_checkpoint = resume_choice in ['y', 'yes']
-    
+
     if torch.cuda.is_available():
         torch.backends.cudnn.benchmark = True
         torch.backends.cudnn.enabled = True
@@ -94,76 +90,76 @@ def main():
             torch.backends.cudnn.allow_tf32 = True
         if hasattr(torch.backends.cuda.matmul, 'allow_tf32'):
             torch.backends.cuda.matmul.allow_tf32 = True
-    
+
     use_mixed_precision = torch.cuda.is_available() and torch.cuda.get_device_capability()[0] >= 7
     scaler = torch.cuda.amp.GradScaler() if use_mixed_precision else None
     print(f"Mixed precision: {use_mixed_precision}")
-    
+
     start_time = time.time()
-    
-    training_log = {
-        'epochs': [],
-        'batches': [],
-        'total_time_hours': 0,
-        'estimated_cost': 0,
-        'final_stats': {}
-    }
-    
+    training_log = {'epochs': [], 'batches': [], 'total_time_hours': 0, 'estimated_cost': 0, 'final_stats': {}}
+
     tokenizer = GPT2TokenizerFast.from_pretrained('gpt2')
     tokenizer.pad_token = tokenizer.eos_token
-    
+
     print("Loading FineWeb dataset...")
-    
     texts = []
-    target_samples = 1_000_000  # 1M rows
-    
+    target_samples = 1_000_000  # 1M rows (streaming)
+    dataset_max_len = 512
+
     fineweb_dataset = load_dataset('HuggingFaceFW/fineweb', split='train', streaming=True)
-    
     for i, item in enumerate(fineweb_dataset):
         if len(texts) >= target_samples:
             break
-        if item['text'] and len(item['text'].strip()) > 100:
+        if item.get('text') and len(item['text'].strip()) > 100:
             clean_text = item['text'].strip()
             if len(clean_text) > 2000:
-                chunks = [clean_text[i:i+1500] for i in range(0, len(clean_text), 1200)]
+                chunks = [clean_text[j:j+1500] for j in range(0, len(clean_text), 1200)]
                 texts.extend(chunks[:3])
             else:
                 texts.append(clean_text)
-        
         if i % 50000 == 0:
             print(f"Loaded {len(texts)} FineWeb samples...")
-    
+
     print(f"Final dataset: {len(texts)} text samples")
-    
+
+    # avoid huge tokenization when estimating avg tokens
     sample_text = ' '.join(texts[:100])
-    sample_tokens = len(tokenizer(sample_text)['input_ids'])
+    sample_tokens = len(tokenizer(sample_text, truncation=True, max_length=dataset_max_len)['input_ids'])
     avg_tokens_per_sample = sample_tokens / 100
     estimated_total_tokens = len(texts) * avg_tokens_per_sample
     print(f"Estimated total tokens: {estimated_total_tokens/1e9:.2f}B")
-    
-    train_dataset = TextDataset(texts, tokenizer)
-    batch_size = 16
+
+    # DataLoader config (reduce num_workers to avoid extra fork issues)
+    train_dataset = TextDataset(texts, tokenizer, max_length=dataset_max_len)
+    batch_size = 8                       # reduced from 16 to lower peak memory
+    gradient_accumulation_steps = 2      # accum steps -> effective batch 8*2 = 16
     train_loader = DataLoader(
-        train_dataset, 
-        batch_size=batch_size, 
+        train_dataset,
+        batch_size=batch_size,
         shuffle=True,
-        num_workers=4,
+        num_workers=2,
         pin_memory=True,
-        persistent_workers=True
+        persistent_workers=False
     )
-    print(f"Using batch size: {batch_size}")
-    
-    model = Transformer(d_model=512, n_layers=8).to(device)  
-    
+    print(f"Using batch size: {batch_size}, grad_accum_steps: {gradient_accumulation_steps}")
+
+    model = Transformer(d_model=512, n_layers=8).to(device)
+    # try enabling gradient checkpointing if supported by your Transformer impl
+    try:
+        if hasattr(model, 'gradient_checkpointing_enable'):
+            model.gradient_checkpointing_enable()
+            print("Enabled gradient checkpointing.")
+    except Exception:
+        pass
+
     total_params = sum(p.numel() for p in model.parameters())
     print(f"Model has {total_params/1e6:.1f}M parameters")
-    
+
     criterion = nn.CrossEntropyLoss(ignore_index=tokenizer.pad_token_id)
     optimizer = optim.AdamW(model.parameters(), lr=6e-4, weight_decay=0.1)
-    
-    num_epochs = 15  
+    num_epochs = 15
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epochs)
-    
+
     start_epoch = 0
     if resume_from_checkpoint:
         try:
@@ -173,96 +169,112 @@ def main():
             print(f"Failed to load checkpoint: {e}")
             print("Starting fresh training...")
             start_epoch = 0
-    
+
+    # clear caches before training starts
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
     model.train()
     for epoch in range(start_epoch, num_epochs):
-        total_loss = 0
+        total_loss = 0.0
+        processed_batches = 0
         epoch_start = time.time()
-        epoch_log = {
-            'epoch': epoch,
-            'batches': [],
-            'avg_loss': 0,
-            'avg_perplexity': 0,
-            'time_minutes': 0
-        }
-        
+        epoch_log = {'epoch': epoch, 'batches': [], 'avg_loss': 0, 'avg_perplexity': 0, 'time_minutes': 0}
+
+        optimizer.zero_grad(set_to_none=True)
+        last_grad_norm = 0.0
+
         for batch_idx, batch in enumerate(train_loader):
             input_ids = batch['input_ids'].to(device, non_blocking=True)
             targets = batch['targets'].to(device, non_blocking=True)
-            
-            optimizer.zero_grad(set_to_none=True)
-            
-            if use_mixed_precision:
-                with torch.cuda.amp.autocast():
-                    logits = model(input_ids)
-                    loss = criterion(
-                        logits.view(-1, logits.size(-1)), 
-                        targets.view(-1)
-                    )
-                
-                scaler.scale(loss).backward()
-                scaler.unscale_(optimizer)
-                grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-                scaler.step(optimizer)
-                scaler.update()
-            else:
+
+            # forward + loss (use new amp API)
+            with torch.amp.autocast(device_type='cuda', enabled=use_mixed_precision):
                 logits = model(input_ids)
-                loss = criterion(
-                    logits.view(-1, logits.size(-1)), 
-                    targets.view(-1)
-                )
-                loss.backward()
-                grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-                optimizer.step()
-            
-            total_loss += loss.item()
-            perplexity = math.exp(min(loss.item(), 10)) 
-            
+                loss = criterion(logits.view(-1, logits.size(-1)), targets.view(-1))
+
+            # record the raw loss for logging (before dividing for accumulation)
+            raw_loss = loss.detach().item()
+            perplexity = math.exp(min(raw_loss, 10))
+
+            # scale loss for gradient accumulation
+            loss = loss / gradient_accumulation_steps
+
+            # backward with OOM handling
+            try:
+                if use_mixed_precision:
+                    scaler.scale(loss).backward()
+                else:
+                    loss.backward()
+            except RuntimeError as e:
+                if 'out of memory' in str(e).lower():
+                    print(f"OOM at epoch {epoch} batch {batch_idx} — clearing cache and skipping batch")
+                    torch.cuda.empty_cache()
+                    optimizer.zero_grad(set_to_none=True)
+                    continue
+                else:
+                    raise
+
+            total_loss += raw_loss
+            processed_batches += 1
+
+            # step when we've accumulated enough gradients
+            if (batch_idx + 1) % gradient_accumulation_steps == 0:
+                if use_mixed_precision:
+                    # unscale, clip, step, update scaler
+                    scaler.unscale_(optimizer)
+                    last_grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                    scaler.step(optimizer)
+                    scaler.update()
+                else:
+                    last_grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                    optimizer.step()
+                optimizer.zero_grad(set_to_none=True)
+
+            # periodic logging (every 100 raw batches)
             if batch_idx % 100 == 0:
                 elapsed_hours = (time.time() - start_time) / 3600
                 current_lr = scheduler.get_last_lr()[0]
                 batch_log = {
                     'batch': batch_idx,
-                    'loss': loss.item(),
+                    'loss': raw_loss,
                     'perplexity': perplexity,
                     'learning_rate': current_lr,
-                    'grad_norm': grad_norm.item(),
+                    'grad_norm': float(last_grad_norm),
                     'elapsed_hours': elapsed_hours,
                     'estimated_cost': elapsed_hours * 0.26
                 }
                 epoch_log['batches'].append(batch_log)
-                
-                print(f'Epoch {epoch}, Batch {batch_idx}, Loss: {loss.item():.4f}, '
-                      f'Perplexity: {perplexity:.2f}, LR: {current_lr:.6f}, '
-                      f'Grad Norm: {grad_norm.item():.4f}, '
-                      f'Time: {elapsed_hours:.2f}h, Cost: ${elapsed_hours * 0.26:.2f}')
-            
+                print(f'Epoch {epoch}, Batch {batch_idx}, Loss: {raw_loss:.4f}, Perplexity: {perplexity:.2f}, '
+                      f'LR: {current_lr:.6f}, Grad Norm: {last_grad_norm:.4f}, Time: {elapsed_hours:.2f}h, '
+                      f'Cost: ${elapsed_hours * 0.26:.2f}')
+
+        # scheduler step per epoch
         scheduler.step()
-        
-        avg_loss = total_loss / len(train_loader)
+
+        # average loss over processed batches (avoid division by len(train_loader) if some batches skipped)
+        avg_loss = total_loss / processed_batches if processed_batches > 0 else float('inf')
         avg_perplexity = math.exp(min(avg_loss, 10))
-        epoch_time = (time.time() - epoch_start) / 60
-        
+        epoch_time = (time.time() - epoch_start) / 60.0
+
         epoch_log['avg_loss'] = avg_loss
         epoch_log['avg_perplexity'] = avg_perplexity
         epoch_log['time_minutes'] = epoch_time
         training_log['epochs'].append(epoch_log)
-        
-        print(f'Epoch {epoch} completed in {epoch_time:.1f} min. '
-              f'Average Loss: {avg_loss:.4f}, Average Perplexity: {avg_perplexity:.2f}')
-        
-        # Save checkpoint every 5 epochs or on final epoch
+
+        print(f'Epoch {epoch} completed in {epoch_time:.1f} min. Average Loss: {avg_loss:.4f}, '
+              f'Average Perplexity: {avg_perplexity:.2f}')
+
+        # Save every 5 epochs (or final epoch)
         if (epoch + 1) % 5 == 0 or epoch == num_epochs - 1:
             save_checkpoint(model, optimizer, scheduler, epoch, len(train_loader)-1, avg_loss, training_log)
-        
-        # Early stopping if loss is very low
+
         if avg_loss < 1.5:
             print(f"Loss is very low ({avg_loss:.4f}), model likely converged")
-            print("You can stop training or continue for more epochs.")
-    
-    total_time = (time.time() - start_time) / 3600
+
+    total_time = (time.time() - start_time) / 3600.0
     estimated_cost = total_time * 0.26
-    
+
     training_log['total_time_hours'] = total_time
     training_log['estimated_cost'] = estimated_cost
     training_log['final_stats'] = {
@@ -275,10 +287,10 @@ def main():
         'num_epochs': num_epochs,
         'model_parameters': total_params
     }
-    
+
     with open('training_log.json', 'w') as f:
         json.dump(training_log, f, indent=2)
-    
+
     torch.save({
         'model_state_dict': model.state_dict(),
         'optimizer_state_dict': optimizer.state_dict(),
@@ -291,7 +303,7 @@ def main():
         'batch_size': batch_size,
         'model_parameters': total_params
     }, 'WebLM-77M.pth')
-    
+
     print(f"\nTraining completed!")
     print(f"Total time: {total_time:.2f} hours")
     print(f"Estimated cost: ${estimated_cost:.2f}")
@@ -299,7 +311,6 @@ def main():
     print(f"Final perplexity: {avg_perplexity:.2f}")
     print("Model saved as 'WebLM-77M.pth'")
     print("Training log saved as 'training_log.json'")
-    
 
 if __name__ == "__main__":
     main()
