@@ -5,7 +5,7 @@ import torch.nn.functional as F
 
 class Net(nn.Module):
     
-    def __init__(self, d_model=192):
+    def __init__(self, d_model=128):
         super(Net, self).__init__()
         self.d_model = d_model
         self.d_ff = 4 * d_model
