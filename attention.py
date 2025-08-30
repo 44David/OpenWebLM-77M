@@ -4,7 +4,7 @@ import torch.nn.functional as F
 import math
 
 class MultiHeadAttention(nn.Module):
-    def __init__(self, d_model=512, n_heads=8):
+    def __init__(self, d_model=256, n_heads=8):
         super().__init__()
         self.d_model = d_model
         self.n_heads = n_heads

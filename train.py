@@ -54,10 +54,10 @@ def save_checkpoint(model, optimizer, scheduler, epoch, batch_idx, loss, trainin
         'training_log': training_log,
         'timestamp': time.time()
     }
-    epoch_path = os.path.join(checkpoint_dir, f'WebLM-77M-epoch-{epoch}.pth')
+    epoch_path = os.path.join(checkpoint_dir, f'WebLM-15M-epoch-{epoch}.pth')
     torch.save(checkpoint, epoch_path)
     print(f"Checkpoint saved: {epoch_path}")
-    latest_path = os.path.join(checkpoint_dir, 'WebLM-77M-latest.pth')
+    latest_path = os.path.join(checkpoint_dir, 'WebLM-15M-latest.pth')
     torch.save(checkpoint, latest_path)
     return epoch_path
 
@@ -78,7 +78,7 @@ def main():
 
     # interactive resume
     resume_from_checkpoint = False
-    checkpoint_path = "checkpoints/WebLM-77M-latest.pth"
+    checkpoint_path = "checkpoints/WebLM-15M-latest.pth"
     if os.path.exists(checkpoint_path):
         resume_choice = input(f"Found checkpoint at {checkpoint_path}. Resume training? (y/n): ").lower().strip()
         resume_from_checkpoint = resume_choice in ['y', 'yes']
@@ -122,17 +122,15 @@ def main():
 
     print(f"Final dataset: {len(texts)} text samples")
 
-    # avoid huge tokenization when estimating avg tokens
     sample_text = ' '.join(texts[:100])
     sample_tokens = len(tokenizer(sample_text, truncation=True, max_length=dataset_max_len)['input_ids'])
     avg_tokens_per_sample = sample_tokens / 100
     estimated_total_tokens = len(texts) * avg_tokens_per_sample
     print(f"Estimated total tokens: {estimated_total_tokens/1e9:.2f}B")
 
-    # DataLoader config (reduce num_workers to avoid extra fork issues)
     train_dataset = TextDataset(texts, tokenizer, max_length=dataset_max_len)
-    batch_size = 8                       # reduced from 16 to lower peak memory
-    gradient_accumulation_steps = 2      # accum steps -> effective batch 8*2 = 16
+    batch_size = 8                       
+    gradient_accumulation_steps = 2       
     train_loader = DataLoader(
         train_dataset,
         batch_size=batch_size,
@@ -143,8 +141,7 @@ def main():
     )
     print(f"Using batch size: {batch_size}, grad_accum_steps: {gradient_accumulation_steps}")
 
-    model = Transformer(d_model=512, n_layers=8).to(device)
-    # try enabling gradient checkpointing if supported by your Transformer impl
+    model = Transformer(d_model=256, n_layers=8).to(device)
     try:
         if hasattr(model, 'gradient_checkpointing_enable'):
             model.gradient_checkpointing_enable()
@@ -157,7 +154,7 @@ def main():
 
     criterion = nn.CrossEntropyLoss(ignore_index=tokenizer.pad_token_id)
     optimizer = optim.AdamW(model.parameters(), lr=6e-4, weight_decay=0.1)
-    num_epochs = 15
+    num_epochs = 8
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epochs)
 
     start_epoch = 0
@@ -170,7 +167,6 @@ def main():
             print("Starting fresh training...")
             start_epoch = 0
 
-    # clear caches before training starts
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
 
@@ -188,19 +184,15 @@ def main():
             input_ids = batch['input_ids'].to(device, non_blocking=True)
             targets = batch['targets'].to(device, non_blocking=True)
 
-            # forward + loss (use new amp API)
             with torch.amp.autocast(device_type='cuda', enabled=use_mixed_precision):
                 logits = model(input_ids)
                 loss = criterion(logits.view(-1, logits.size(-1)), targets.view(-1))
 
-            # record the raw loss for logging (before dividing for accumulation)
             raw_loss = loss.detach().item()
             perplexity = math.exp(min(raw_loss, 10))
 
-            # scale loss for gradient accumulation
             loss = loss / gradient_accumulation_steps
 
-            # backward with OOM handling
             try:
                 if use_mixed_precision:
                     scaler.scale(loss).backward()
@@ -302,14 +294,14 @@ def main():
         'mixed_precision': use_mixed_precision,
         'batch_size': batch_size,
         'model_parameters': total_params
-    }, 'WebLM-77M.pth')
+    }, 'WebLM-15M.pth')
 
     print(f"\nTraining completed!")
     print(f"Total time: {total_time:.2f} hours")
     print(f"Estimated cost: ${estimated_cost:.2f}")
     print(f"Final loss: {avg_loss:.4f}")
     print(f"Final perplexity: {avg_perplexity:.2f}")
-    print("Model saved as 'WebLM-77M.pth'")
+    print("Model saved as 'WebLM-15M.pth'")
     print("Training log saved as 'training_log.json'")
 
 if __name__ == "__main__":

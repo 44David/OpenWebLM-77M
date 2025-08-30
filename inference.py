@@ -5,7 +5,7 @@ from model import Transformer
 import os
 
 class ModelChat:
-    def __init__(self, model_path='WebLM-77M.pth', use_mixed_precision=True):
+    def __init__(self, model_path='WebLM-15M.pth', use_mixed_precision=True):
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.use_mixed_precision = use_mixed_precision and torch.cuda.is_available()
         
@@ -20,7 +20,7 @@ class ModelChat:
         self.tokenizer = GPT2TokenizerFast.from_pretrained('gpt2')
         self.tokenizer.pad_token = self.tokenizer.eos_token
         
-        self.model = Transformer(d_model=512, n_layers=8).to(self.device)
+        self.model = Transformer(d_model=256, n_layers=8).to(self.device)
         if self.use_mixed_precision:
             self.model = self.model.half()
             
@@ -93,7 +93,7 @@ class ModelChat:
 
     def interactive_chat(self):
         print("\n" + "="*50)
-        print("WebLM-77M Interactive Chat")
+        print("WebLM-15M Interactive Chat")
         print("Commands:")
         print("  'quit' or 'exit' - Exit chat")
         print("  'temp X' - Set temperature (e.g., 'temp 0.7')")
@@ -152,12 +152,12 @@ def main():
     import sys
     import glob
     
-    model_path = 'WebLM-77M.pth'
+    model_path = 'WebLM-15M.pth'
     if len(sys.argv) > 1:
         model_path = sys.argv[1]
     
-    if model_path == 'WebLM-77M.pth' and not os.path.exists(model_path):
-        checkpoint_files = glob.glob('checkpoints/WebLM-77M-epoch-*.pth')
+    if model_path == 'WebLM-15M.pth' and not os.path.exists(model_path):
+        checkpoint_files = glob.glob('checkpoints/WebLM-15M-epoch-*.pth')
         if checkpoint_files:
             checkpoint_files.sort(key=lambda x: int(x.split('-epoch-')[1].split('.')[0]))
             print("Available epoch checkpoints:")
