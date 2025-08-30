@@ -2,7 +2,7 @@
 import os
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:128"
-
+import pickle
 import time
 import json
 import math
@@ -14,32 +14,39 @@ from transformers import GPT2TokenizerFast
 from datasets import load_dataset
 from model import Transformer
 
-class TextDataset(Dataset):
+class PreTokenizedDataset(Dataset):
     def __init__(self, texts, tokenizer, max_length=512):
-        """
-        NOTE: reduced max_length to 512 to lower memory footprint.
-        Increase if your GPU can handle it.
-        """
-        self.tokenizer = tokenizer
-        self.max_length = max_length
-        self.texts = texts
+        print("Pre-tokenizing all texts...")
+        self.input_ids = []
+        self.targets = []
+        
+        for i, text in enumerate(texts):
+            tokens = tokenizer(
+                text,
+                max_length=max_length,
+                truncation=True,
+                padding='max_length',
+                return_tensors='pt'
+            )
+            input_ids = tokens['input_ids'].squeeze(0)
+            self.input_ids.append(input_ids[:-1])
+            self.targets.append(input_ids[1:])
+            
+            if i % 50000 == 0:
+                print(f"Tokenized {i}/{len(texts)} texts")
+        
+        # Convert to tensors
+        self.input_ids = torch.stack(self.input_ids)
+        self.targets = torch.stack(self.targets)
+        print(f"Pre-tokenization complete. Shape: {self.input_ids.shape}")
     
     def __len__(self):
-        return len(self.texts)
+        return len(self.input_ids)
     
     def __getitem__(self, idx):
-        text = self.texts[idx]
-        tokens = self.tokenizer(
-            text,
-            max_length=self.max_length,
-            truncation=True,
-            padding='max_length',
-            return_tensors='pt'
-        )
-        input_ids = tokens['input_ids'].squeeze(0)
         return {
-            'input_ids': input_ids[:-1],
-            'targets': input_ids[1:]
+            'input_ids': self.input_ids[idx],
+            'targets': self.targets[idx]
         }
 
 def save_checkpoint(model, optimizer, scheduler, epoch, batch_idx, loss, training_log, checkpoint_dir="checkpoints"):
@@ -76,7 +83,6 @@ def main():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
 
-    # interactive resume
     resume_from_checkpoint = False
     checkpoint_path = "checkpoints/WebLM-15M-latest.pth"
     if os.path.exists(checkpoint_path):
@@ -103,22 +109,38 @@ def main():
 
     print("Loading FineWeb dataset...")
     texts = []
-    target_samples = 1_000_000  # 1M rows (streaming)
+    target_samples = 1_000_000  
     dataset_max_len = 512
 
-    fineweb_dataset = load_dataset('HuggingFaceFW/fineweb', split='train', streaming=True)
-    for i, item in enumerate(fineweb_dataset):
-        if len(texts) >= target_samples:
-            break
-        if item.get('text') and len(item['text'].strip()) > 100:
-            clean_text = item['text'].strip()
-            if len(clean_text) > 2000:
-                chunks = [clean_text[j:j+1500] for j in range(0, len(clean_text), 1200)]
-                texts.extend(chunks[:3])
-            else:
-                texts.append(clean_text)
-        if i % 50000 == 0:
-            print(f"Loaded {len(texts)} FineWeb samples...")
+    local_path = './fineweb_1M'
+    if not os.path.exists(local_path):
+        print("Downloading dataset to local storage (one-time setup)...")
+        fineweb_dataset = load_dataset('HuggingFaceFW/fineweb', split='train', streaming=True)
+        temp_texts = []
+        for i, item in enumerate(fineweb_dataset):
+            if len(temp_texts) >= target_samples:
+                break
+            if item.get('text') and len(item['text'].strip()) > 100:
+                clean_text = item['text'].strip()
+                if len(clean_text) > 2000:
+                    chunks = [clean_text[j:j+1500] for j in range(0, len(clean_text), 1200)]
+                    temp_texts.extend(chunks[:3])
+                else:
+                    temp_texts.append(clean_text)
+            if i % 50000 == 0:
+                print(f"Downloaded {len(temp_texts)} samples...")
+
+
+        os.makedirs(local_path, exist_ok=True)
+        with open(f'{local_path}/texts.pkl', 'wb') as f:
+            pickle.dump(temp_texts[:target_samples], f)
+        print(f"Saved {len(temp_texts[:target_samples])} samples locally")
+
+    print("Loading from local storage...")
+    with open(f'{local_path}/texts.pkl', 'rb') as f:
+        texts = pickle.load(f)
+
+    print(f"Loaded {len(texts)} text samples from local storage")
 
     print(f"Final dataset: {len(texts)} text samples")
 
@@ -128,16 +150,18 @@ def main():
     estimated_total_tokens = len(texts) * avg_tokens_per_sample
     print(f"Estimated total tokens: {estimated_total_tokens/1e9:.2f}B")
 
-    train_dataset = TextDataset(texts, tokenizer, max_length=dataset_max_len)
-    batch_size = 8                       
-    gradient_accumulation_steps = 2       
+    train_dataset = PreTokenizedDataset(texts, tokenizer, max_length=dataset_max_len)
+    batch_size = 128
+    gradient_accumulation_steps = 1
     train_loader = DataLoader(
         train_dataset,
         batch_size=batch_size,
         shuffle=True,
-        num_workers=2,
+        num_workers=8,
         pin_memory=True,
-        persistent_workers=False
+        persistent_workers=True,
+        prefetch_factor=4,
+        drop_last=True
     )
     print(f"Using batch size: {batch_size}, grad_accum_steps: {gradient_accumulation_steps}")
 
@@ -154,7 +178,7 @@ def main():
 
     criterion = nn.CrossEntropyLoss(ignore_index=tokenizer.pad_token_id)
     optimizer = optim.AdamW(model.parameters(), lr=6e-4, weight_decay=0.1)
-    num_epochs = 8
+    num_epochs = 6
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epochs)
 
     start_epoch = 0
@@ -181,8 +205,8 @@ def main():
         last_grad_norm = 0.0
 
         for batch_idx, batch in enumerate(train_loader):
-            input_ids = batch['input_ids'].to(device, non_blocking=True)
-            targets = batch['targets'].to(device, non_blocking=True)
+            input_ids = batch['input_ids'].to(device, non_blocking=True, memory_format=torch.contiguous_format)
+            targets = batch['targets'].to(device, non_blocking=True, memory_format=torch.contiguous_format)
 
             with torch.amp.autocast(device_type='cuda', enabled=use_mixed_precision):
                 logits = model(input_ids)
@@ -210,10 +234,8 @@ def main():
             total_loss += raw_loss
             processed_batches += 1
 
-            # step when we've accumulated enough gradients
             if (batch_idx + 1) % gradient_accumulation_steps == 0:
                 if use_mixed_precision:
-                    # unscale, clip, step, update scaler
                     scaler.unscale_(optimizer)
                     last_grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
                     scaler.step(optimizer)
@@ -223,7 +245,6 @@ def main():
                     optimizer.step()
                 optimizer.zero_grad(set_to_none=True)
 
-            # periodic logging (every 100 raw batches)
             if batch_idx % 100 == 0:
                 elapsed_hours = (time.time() - start_time) / 3600
                 current_lr = scheduler.get_last_lr()[0]
@@ -241,10 +262,8 @@ def main():
                       f'LR: {current_lr:.6f}, Grad Norm: {last_grad_norm:.4f}, Time: {elapsed_hours:.2f}h, '
                       f'Cost: ${elapsed_hours * 0.26:.2f}')
 
-        # scheduler step per epoch
         scheduler.step()
 
-        # average loss over processed batches (avoid division by len(train_loader) if some batches skipped)
         avg_loss = total_loss / processed_batches if processed_batches > 0 else float('inf')
         avg_perplexity = math.exp(min(avg_loss, 10))
         epoch_time = (time.time() - epoch_start) / 60.0
@@ -257,7 +276,6 @@ def main():
         print(f'Epoch {epoch} completed in {epoch_time:.1f} min. Average Loss: {avg_loss:.4f}, '
               f'Average Perplexity: {avg_perplexity:.2f}')
 
-        # Save every 5 epochs (or final epoch)
         if (epoch + 1) % 5 == 0 or epoch == num_epochs - 1:
             save_checkpoint(model, optimizer, scheduler, epoch, len(train_loader)-1, avg_loss, training_log)
 
