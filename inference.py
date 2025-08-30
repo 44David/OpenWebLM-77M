@@ -20,7 +20,7 @@ class ModelChat:
         self.tokenizer = GPT2TokenizerFast.from_pretrained('gpt2')
         self.tokenizer.pad_token = self.tokenizer.eos_token
         
-        self.model = Transformer(d_model=256, n_layers=8).to(self.device)
+        self.model = Transformer(d_model=192, n_layers=8).to(self.device)
         if self.use_mixed_precision:
             self.model = self.model.half()
             

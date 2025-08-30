@@ -33,7 +33,7 @@ class DecoderBlock(nn.Module):
     
 
 class Transformer(nn.Module):
-    def __init__(self, vocab_size=50257, d_model=256, n_layers=8):
+    def __init__(self, vocab_size=50257, d_model=192, n_layers=8):
         super().__init__()
         
         self.d_model = d_model

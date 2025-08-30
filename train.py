@@ -141,7 +141,7 @@ def main():
     )
     print(f"Using batch size: {batch_size}, grad_accum_steps: {gradient_accumulation_steps}")
 
-    model = Transformer(d_model=256, n_layers=8).to(device)
+    model = Transformer(d_model=192, n_layers=8).to(device)
     try:
         if hasattr(model, 'gradient_checkpointing_enable'):
             model.gradient_checkpointing_enable()
