@@ -6,6 +6,7 @@ import pickle
 import time
 import json
 import math
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -14,39 +15,65 @@ from transformers import GPT2TokenizerFast
 from datasets import load_dataset
 from model import Transformer
 
-class PreTokenizedDataset(Dataset):
-    def __init__(self, texts, tokenizer, max_length=512):
-        print("Pre-tokenizing all texts...")
-        self.input_ids = []
-        self.targets = []
+class MemoryMappedDataset(Dataset):
+    def __init__(self, texts, tokenizer, max_length=512, cache_dir='./tokenized_cache'):
+        print("Setting up memory-mapped dataset...")
+        os.makedirs(cache_dir, exist_ok=True)
         
-        for i, text in enumerate(texts):
-            tokens = tokenizer(
-                text,
-                max_length=max_length,
-                truncation=True,
-                padding='max_length',
-                return_tensors='pt'
-            )
-            input_ids = tokens['input_ids'].squeeze(0)
-            self.input_ids.append(input_ids[:-1])
-            self.targets.append(input_ids[1:])
+        input_ids_path = os.path.join(cache_dir, 'input_ids.npy')
+        targets_path = os.path.join(cache_dir, 'targets.npy')
+        
+        if os.path.exists(input_ids_path) and os.path.exists(targets_path):
+            print("Loading from cached tokenized files...")
+            self.input_ids = np.memmap(input_ids_path, dtype=np.int32, mode='r')
+            self.targets = np.memmap(targets_path, dtype=np.int32, mode='r')
+            self.input_ids = self.input_ids.reshape(-1, max_length - 1)
+            self.targets = self.targets.reshape(-1, max_length - 1)
+        else:
+            print("Pre-tokenizing and caching to disk...")
+            input_ids_list = []
+            targets_list = []
             
-            if i % 50000 == 0:
-                print(f"Tokenized {i}/{len(texts)} texts")
+            for i, text in enumerate(texts):
+                tokens = tokenizer(
+                    text,
+                    max_length=max_length,
+                    truncation=True,
+                    padding='max_length',
+                    return_tensors='pt'
+                )
+                input_ids = tokens['input_ids'].squeeze(0)
+                input_ids_list.append(input_ids[:-1].numpy().astype(np.int32))
+                targets_list.append(input_ids[1:].numpy().astype(np.int32))
+                
+                if i % 50000 == 0:
+                    print(f"Tokenized {i}/{len(texts)} texts")
+            
+            input_ids_array = np.stack(input_ids_list)
+            targets_array = np.stack(targets_list)
+            
+            input_ids_mmap = np.memmap(input_ids_path, dtype=np.int32, mode='w+', shape=input_ids_array.shape)
+            targets_mmap = np.memmap(targets_path, dtype=np.int32, mode='w+', shape=targets_array.shape)
+            
+            input_ids_mmap[:] = input_ids_array[:]
+            targets_mmap[:] = targets_array[:]
+            
+            del input_ids_mmap, targets_mmap
+            
+            self.input_ids = np.memmap(input_ids_path, dtype=np.int32, mode='r').reshape(-1, max_length - 1)
+            self.targets = np.memmap(targets_path, dtype=np.int32, mode='r').reshape(-1, max_length - 1)
+            
+            print(f"Cached tokenized data to {cache_dir}")
         
-        # Convert to tensors
-        self.input_ids = torch.stack(self.input_ids)
-        self.targets = torch.stack(self.targets)
-        print(f"Pre-tokenization complete. Shape: {self.input_ids.shape}")
+        print(f"Dataset ready. Shape: {self.input_ids.shape}")
     
     def __len__(self):
         return len(self.input_ids)
     
     def __getitem__(self, idx):
         return {
-            'input_ids': self.input_ids[idx],
-            'targets': self.targets[idx]
+            'input_ids': torch.from_numpy(self.input_ids[idx].copy()),
+            'targets': torch.from_numpy(self.targets[idx].copy())
         }
 
 def save_checkpoint(model, optimizer, scheduler, epoch, batch_idx, loss, training_log, checkpoint_dir="checkpoints"):
@@ -130,7 +157,6 @@ def main():
             if i % 50000 == 0:
                 print(f"Downloaded {len(temp_texts)} samples...")
 
-
         os.makedirs(local_path, exist_ok=True)
         with open(f'{local_path}/texts.pkl', 'wb') as f:
             pickle.dump(temp_texts[:target_samples], f)
@@ -150,17 +176,17 @@ def main():
     estimated_total_tokens = len(texts) * avg_tokens_per_sample
     print(f"Estimated total tokens: {estimated_total_tokens/1e9:.2f}B")
 
-    train_dataset = PreTokenizedDataset(texts, tokenizer, max_length=dataset_max_len)
-    batch_size = 32
+    train_dataset = MemoryMappedDataset(texts, tokenizer, max_length=dataset_max_len)
+    batch_size = 64 
     gradient_accumulation_steps = 1
     train_loader = DataLoader(
         train_dataset,
         batch_size=batch_size,
         shuffle=True,
-        num_workers=8,
+        num_workers=2, 
         pin_memory=True,
-        persistent_workers=True,
-        prefetch_factor=4,
+        persistent_workers=False,  
+        prefetch_factor=2,  
         drop_last=True
     )
     print(f"Using batch size: {batch_size}, grad_accum_steps: {gradient_accumulation_steps}")
@@ -244,6 +270,9 @@ def main():
                     last_grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
                     optimizer.step()
                 optimizer.zero_grad(set_to_none=True)
+
+            if batch_idx % 1000 == 0 and batch_idx > 0:
+                torch.cuda.empty_cache()
 
             if batch_idx % 100 == 0:
                 elapsed_hours = (time.time() - start_time) / 3600
