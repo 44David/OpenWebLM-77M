@@ -151,7 +151,7 @@ def main():
     print(f"Estimated total tokens: {estimated_total_tokens/1e9:.2f}B")
 
     train_dataset = PreTokenizedDataset(texts, tokenizer, max_length=dataset_max_len)
-    batch_size = 128
+    batch_size = 32
     gradient_accumulation_steps = 1
     train_loader = DataLoader(
         train_dataset,
